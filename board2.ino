@@ -7,6 +7,8 @@
 #include <WiFiManager.h> 
 #include <ArduinoJson.h>
 #include <ezTime.h>     
+#include "esp_adc_cal.h"
+#include "math.h"
 
 #define INTERVAL 10000  // IoT message sending interval in ms
 #define MESSAGE_MAX_LEN 256
@@ -28,7 +30,13 @@ int received_msg_type = -1;                             // if 0 the HUB wants to
 #define STATUS 0
 #define SET_VALUES 1
 #define HUB_ACK 2
-
+// defines for voltages corresponding to temperature ranges, for PT1000:
+//1.25V   corresponds to 0 deg C
+//1.4518V  corresponds to 100 deg C
+float mv = 0.816326;        // Vin = mv * ADC + qv
+float qv = 121.836734;
+float mt =  0.5;      // Temperature = mt * Vin + qt
+float qt = -625;
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
@@ -125,6 +133,21 @@ static void DeviceTwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsig
   }
 */
 
+float read_temperature() {
+  digitalWrite(ST1_FORCE_GPIO, HIGH);
+  float mean = 0;
+    for(int i = 0; i < 100; i++)  {
+        float val = analogRead(ST1_MEASURE_GPIO);
+        float vin = (mv * val + qv);
+        float temperaturec = (mt * vin + qt);
+        mean += temperaturec;
+        delay(10); 
+      }
+  digitalWrite(ST1_FORCE_GPIO, LOW);
+  Serial.println(String("Temperature in deg C: ") + String(mean/100, 2));
+  return roundf(mean) / 100; 
+}
+
 void setup() {
   pinMode(EV1_GPIO, OUTPUT);
   pinMode(PC1_GPIO, OUTPUT);     
@@ -199,9 +222,11 @@ if (hasWifi && hasIoTHub)
       msgtosend["iot_module_software_version"] = "0.1";
       msgtosend["SL2"] = digitalRead(SL2_GPIO);
       msgtosend["SL3"] = digitalRead(SL3_GPIO);
-      msgtosend["PC1"] = PC1_status;
+      msgtosend["ST1"] = read_temperature();
+      msgtosend["EV1"] = EV1_status;      
       msgtosend["R1"] = R1_status;
-      msgtosend["EV1"] = EV1_status;
+      msgtosend["PC1"] = PC1_status;
+
       char out[256];
       int msgsize =serializeJson(msgtosend, out);
       //Serial.println(msgsize);
