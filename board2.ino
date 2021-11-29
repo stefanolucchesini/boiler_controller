@@ -1,7 +1,3 @@
-/**
- * A simple Azure IoT example for sending telemetry to Iot Hub.
- */
-
 #include <WiFi.h>
 #include "Esp32MQTTClient.h"
 #include <WiFiManager.h> 
@@ -10,22 +6,19 @@
 #include "esp_adc_cal.h"
 #include "math.h"
 
-#define INTERVAL 10000  // IoT message sending interval in ms
-#define MESSAGE_MAX_LEN 256
-
-
 //// Actuators status////
 int PC1_status = 0;                                        //status of the recirculation pump (0: OFF, 1: ON)
 int EV1_status = 0;                                        //status of the electrovalve 1 (0: OFF, 1: ON)
-int R1_status = 0;                                        //status of the boiler resistor (0: OFF, 1: ON)
-//// firmware version of the device  ////
-char sw_version[] = "0.1";    
+int R1_status = 0;                                         //status of the boiler resistor (0: OFF, 1: ON)
+//// firmware version of the device and device id ////
+#define SW_VERSION "0.1"
+#define DEVICE_ID "geniale board 2"   
 //// Other handy variables ////
 volatile int new_request = 0;                             // flag that tells if a new request has arrived from the hub
 int received_msg_id = 0;                                  // used for ack mechanism
-int received_msg_type = -1;                             // if 0 the HUB wants to know the status of the device
+int received_msg_type = -1;                               // if 0 the HUB wants to know the status of the device
                                                           // if 1 the HUB wants to change the status of the device (with thw values passed in the message)
-                                                          // if 2 the HUB ACKs the device
+                                                          // if 2 the device ACKs the HUB
 // defines for message type 
 #define STATUS 0
 #define SET_VALUES 1
@@ -33,10 +26,9 @@ int received_msg_type = -1;                             // if 0 the HUB wants to
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1.25V   corresponds to 0 deg C
 //1.4518V  corresponds to 100 deg C
-float mv = 0.816326;        // Vin = mv * ADC + qv
-float qv = 121.836734;
-float mt =  0.5;      // Temperature = mt * Vin + qt
-float qt = -625;
+// Temperature = M * ADC + Q
+float M = 0.408163;
+float Q = -564.081633;
 // STATUS LED HANDLING
 #define LED_CHANNEL 0
 #define RESOLUTION 8
@@ -48,6 +40,8 @@ float qt = -625;
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
 static bool hasWifi = false;
+#define INTERVAL 10000  // IoT message sending interval in ms
+#define MESSAGE_MAX_LEN 256
 //int messageCount = 1;
 //static bool messageSending = true;
 //static uint64_t send_interval_ms;
@@ -147,14 +141,13 @@ float read_temperature() {
     // acquire 100 samples and compute mean
     for(int i = 0; i < 100; i++)  {
         float val = analogRead(ST1_MEASURE_GPIO);
-        float vin = (mv * val + qv);
-        float temperaturec = (mt * vin + qt);
+        float temperaturec = M * val + Q;
         mean += temperaturec;
         delay(10); 
       }
   digitalWrite(ST1_FORCE_GPIO, LOW);
   //Serial.println(String("Temperature in deg C: ") + String(mean/100, 2));
-  return roundf(mean) / 100; 
+  return roundf(mean/10) / 10;   //return the temperature with a single decimal place
 }
 
 void setup() {
@@ -231,8 +224,8 @@ if (hasWifi && hasIoTHub)
       msgtosend["message_id"] = received_msg_id;
       msgtosend["timestamp"] = UTC.dateTime(ISO8601);
       msgtosend["message_type"] = reply_type;
-      msgtosend["device_id"] = "geniale board 2";
-      msgtosend["iot_module_software_version"] = "0.1";
+      msgtosend["device_id"] = DEVICE_ID;
+      msgtosend["iot_module_software_version"] = SW_VERSION;
       msgtosend["SL2"] = digitalRead(SL2_GPIO);
       msgtosend["SL3"] = digitalRead(SL3_GPIO);
       msgtosend["ST1"] = read_temperature();
