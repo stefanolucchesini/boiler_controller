@@ -30,13 +30,20 @@ int received_msg_type = -1;                             // if 0 the HUB wants to
 #define STATUS 0
 #define SET_VALUES 1
 #define HUB_ACK 2
-// defines for voltages corresponding to temperature ranges, for PT1000:
+// Variables for voltages corresponding to temperature ranges, for PT1000:
 //1.25V   corresponds to 0 deg C
 //1.4518V  corresponds to 100 deg C
 float mv = 0.816326;        // Vin = mv * ADC + qv
 float qv = 121.836734;
 float mt =  0.5;      // Temperature = mt * Vin + qt
 float qt = -625;
+// STATUS LED HANDLING
+#define LED_CHANNEL 0
+#define RESOLUTION 8
+#define LED_PWM_FREQ 10
+#define OFF 0
+#define BLINK_5HZ 128
+#define ON 255
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
@@ -65,6 +72,7 @@ static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
 
 static void MessageCallback(const char* payLoad, int size)
 {
+  ledcWrite(LED_CHANNEL, ON);
   Serial.println("Received message from HUB");
   if (size < 256) { 
     StaticJsonDocument<256> doc;
@@ -136,6 +144,7 @@ static void DeviceTwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsig
 float read_temperature() {
   digitalWrite(ST1_FORCE_GPIO, HIGH);
   float mean = 0;
+    // acquire 100 samples and compute mean
     for(int i = 0; i < 100; i++)  {
         float val = analogRead(ST1_MEASURE_GPIO);
         float vin = (mv * val + qv);
@@ -144,7 +153,7 @@ float read_temperature() {
         delay(10); 
       }
   digitalWrite(ST1_FORCE_GPIO, LOW);
-  Serial.println(String("Temperature in deg C: ") + String(mean/100, 2));
+  //Serial.println(String("Temperature in deg C: ") + String(mean/100, 2));
   return roundf(mean) / 100; 
 }
 
@@ -155,13 +164,16 @@ void setup() {
   pinMode(SL2_GPIO, INPUT);
   pinMode(SL3_GPIO, INPUT);
   pinMode(ST1_FORCE_GPIO, OUTPUT);
-  pinMode(LED, OUTPUT);                              // Status LED
   pinMode(ST1_MEASURE_GPIO, INPUT);                  // ST1 voltage measurement is done by ADC1_3
   digitalWrite(EV1_GPIO, LOW);                       // Electrovalve is normally closed
   digitalWrite(PC1_GPIO, LOW);
   digitalWrite(R1_GPIO, LOW);
   digitalWrite(ST1_FORCE_GPIO, LOW);
-  digitalWrite(LED, LOW);
+   // configure LED PWM functionalitites
+  ledcSetup(LED_CHANNEL, LED_PWM_FREQ, RESOLUTION);
+  ledcAttachPin(LED, LED_CHANNEL);                              // Attach PWM module to status LED
+  ledcWrite(LED_CHANNEL, BLINK_5HZ);                            // LED initially blinks at 5Hz
+  
   Serial.begin(115200);
   Serial.println("ESP32 Device");
   Serial.println("Initializing...");
@@ -186,11 +198,11 @@ void setup() {
   else {
       //if you get here you have connected to the WiFi    
       Serial.println("Connected to wifi...");
+      ledcWrite(LED_CHANNEL, ON);
       // Wait for ezTime to get its time synchronized
 	    waitForSync();
       Serial.println("UTC Time in ISO8601: " + UTC.dateTime(ISO8601));
       hasWifi = true;
-      digitalWrite(LED, HIGH);
     }
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
@@ -209,6 +221,7 @@ void setup() {
   Serial.println("Waiting for messages from HUB...");
   randomSeed(analogRead(0));
   //send_interval_ms = millis();
+  ledcWrite(LED_CHANNEL, OFF);
 }
 
 void send_reply(int reply_type) {
@@ -234,6 +247,7 @@ if (hasWifi && hasIoTHub)
       Serial.println(out);
       EVENT_INSTANCE* message = Esp32MQTTClient_Event_Generate(out, MESSAGE);
       Esp32MQTTClient_SendEventInstance(message);
+      ledcWrite(LED_CHANNEL, OFF);
   }
 }
 
@@ -246,6 +260,7 @@ void loop() {
       case SET_VALUES: 
         digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
         digitalWrite(R1_GPIO, R1_status);
+        digitalWrite(PC1_GPIO, PC1_status);
         send_reply(HUB_ACK);
         break;
       case STATUS:
@@ -253,6 +268,7 @@ void loop() {
         break;
       default:
         Serial.println("Invalid message type!");
+        ledcWrite(LED_CHANNEL, OFF);
         break;
     }
   }
