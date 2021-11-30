@@ -10,19 +10,28 @@
 int PC1_status = 0;                                        //status of the recirculation pump (0: OFF, 1: ON)
 int EV1_status = 0;                                        //status of the electrovalve 1 (0: OFF, 1: ON)
 int R1_status = 0;                                         //status of the boiler resistor (0: OFF, 1: ON)
+//// Sensors status ////
+volatile int SL2_status;
+volatile int old_SL2_status;
+volatile int SL3_status;
+volatile int old_SL3_status;
+volatile float ST1_temp;
+volatile float old_ST1_temp;
 //// firmware version of the device and device id ////
 #define SW_VERSION "0.1"
 #define DEVICE_ID "geniale board 2"   
 //// Other handy variables ////
+#define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
+#define TEMP_INTERVAL 10                                   // Interval of time in ms between two successive samples
 volatile int new_request = 0;                             // flag that tells if a new request has arrived from the hub
-int received_msg_id = 0;                                  // used for ack mechanism
-int received_msg_type = -1;                               // if 0 the HUB wants to know the status of the device
+volatile int received_msg_id = 0;                         // used for ack mechanism
+volatile int received_msg_type = -1;                      // if 0 the HUB wants to know the status of the device
                                                           // if 1 the HUB wants to change the status of the device (with thw values passed in the message)
                                                           // if 2 the device ACKs the HUB
 // defines for message type 
 #define STATUS 0
 #define SET_VALUES 1
-#define HUB_ACK 2
+#define ACK_HUB 2
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1.25V   corresponds to 0 deg C
 //1.4518V  corresponds to 100 deg C
@@ -40,9 +49,9 @@ float Q = -564.081633;
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
 static bool hasWifi = false;
-#define INTERVAL 10000  // IoT message sending interval in ms
+//#define INTERVAL 10000             // IoT message sending interval in ms
 #define MESSAGE_MAX_LEN 256
-//int messageCount = 1;
+int messageCount = 1;              // tells the number of the sent message
 //static bool messageSending = true;
 //static uint64_t send_interval_ms;
 
@@ -55,6 +64,16 @@ static bool hasWifi = false;
 #define SL3_GPIO   35               // Level sensor 3 connected to GPIO35
 #define ST1_MEASURE_GPIO   39       // Voltage measure temperature sensor 1 connected to GPIO39 (VN)
 #define LED   5                     // Status led connected to GPIO5
+
+// Create a timer to generate an ISR at a defined frequency in order to sample the system
+hw_timer_t * timer = NULL;
+#define OVF_MS 5000                      // The timer interrupt fires every 5 second
+bool new_status = false;       // When it's true a sensor has changed its value and it needs to be sent
+volatile bool timetosample = false; 
+
+void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow every OVF_MS
+  timetosample = true;
+}
 
 static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
 {
@@ -139,15 +158,15 @@ float read_temperature() {
   digitalWrite(ST1_FORCE_GPIO, HIGH);
   float mean = 0;
     // acquire 100 samples and compute mean
-    for(int i = 0; i < 100; i++)  {
+    for(int i = 0; i < TEMP_SAMPLES; i++)  {
         float val = analogRead(ST1_MEASURE_GPIO);
         float temperaturec = M * val + Q;
         mean += temperaturec;
-        delay(10); 
+        delay(TEMP_INTERVAL); 
       }
   digitalWrite(ST1_FORCE_GPIO, LOW);
   //Serial.println(String("Temperature in deg C: ") + String(mean/100, 2));
-  return roundf(mean/10) / 10;   //return the temperature with a single decimal place
+  return roundf(mean/(TEMP_SAMPLES/10)) / 10;   //return the temperature with a single decimal place
 }
 
 void setup() {
@@ -176,21 +195,20 @@ void setup() {
   delay(10);
 
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
-  // it is a good practice to make sure your code sets wifi mode how you want it.
   WiFiManager wm;
   //wm.resetSettings();  // reset settings - wipe stored credentials for testing
   bool res;
-  // res = wm.autoConnect(); // auto generated AP name from chipid
-  res = wm.autoConnect("GENIALE"); // anonymous ap
-  //res = wm.autoConnect("AutoConnectAP","password"); // password protected ap
+  res = wm.autoConnect("GENIALE brd2 setup"); // Generates a pwd-free ap for the user to connect and tell Wi-Fi credentials
+  //res = wm.autoConnect("AutoConnectAP","password"); // Generates a pwd-protected ap for the user to connect and tell Wi-Fi credentials
 
   if(!res) {
       Serial.println("Failed to connect to wifi");
-      // ESP.restart();
+      delay(10000);
+      ESP.restart();
   } 
   else {
       //if you get here you have connected to the WiFi    
-      Serial.println("Connected to wifi...");
+      Serial.println("Connected to wifi!");
       ledcWrite(LED_CHANNEL, ON);
       // Wait for ezTime to get its time synchronized
 	    waitForSync();
@@ -211,24 +229,36 @@ void setup() {
   Esp32MQTTClient_SetMessageCallback(MessageCallback);
   //Esp32MQTTClient_SetDeviceTwinCallback(DeviceTwinCallback);
   //Esp32MQTTClient_SetDeviceMethodCallback(DeviceMethodCallback);
-  Serial.println("Waiting for messages from HUB...");
   randomSeed(analogRead(0));
   //send_interval_ms = millis();
+  /* Use 1st timer of 4 */
+  /* 1 tick take 1/(80MHZ/80) = 1us so we set divider 80 and count up */
+  timer = timerBegin(0, 80, true);
+  /* Attach onTimer function to our timer */
+  timerAttachInterrupt(timer, &onTimer, true);
+  /* Set alarm to call onTimer function every OVF_MS milliseconds. 
+  1 tick is 1us*/
+  /* Repeat the alarm (third parameter) */
+  timerAlarmWrite(timer, 1000*OVF_MS, true);
+  /* Start an alarm */
+  timerAlarmEnable(timer);
+  Serial.println("ISR Timer started");
   ledcWrite(LED_CHANNEL, OFF);
+  Serial.println("Waiting for messages from HUB...");
 }
 
-void send_reply(int reply_type) {
+void send_message(int reply_type, int msgid) {
 if (hasWifi && hasIoTHub)
   {
       StaticJsonDocument<256> msgtosend;  // pre-allocate 256 bytes of memory for the json message
-      msgtosend["message_id"] = received_msg_id;
+      msgtosend["message_id"] = msgid;
       msgtosend["timestamp"] = UTC.dateTime(ISO8601);
       msgtosend["message_type"] = reply_type;
       msgtosend["device_id"] = DEVICE_ID;
       msgtosend["iot_module_software_version"] = SW_VERSION;
-      msgtosend["SL2"] = digitalRead(SL2_GPIO);
-      msgtosend["SL3"] = digitalRead(SL3_GPIO);
-      msgtosend["ST1"] = read_temperature();
+      msgtosend["SL2"] = SL2_status;
+      msgtosend["SL3"] = SL3_status;
+      msgtosend["ST1"] = ST1_temp;
       msgtosend["EV1"] = EV1_status;      
       msgtosend["R1"] = R1_status;
       msgtosend["PC1"] = PC1_status;
@@ -236,7 +266,7 @@ if (hasWifi && hasIoTHub)
       char out[256];
       int msgsize =serializeJson(msgtosend, out);
       //Serial.println(msgsize);
-      Serial.println("Replying to HUB with:");
+      Serial.println("Sending message to HUB:");
       Serial.println(out);
       EVENT_INSTANCE* message = Esp32MQTTClient_Event_Generate(out, MESSAGE);
       Esp32MQTTClient_SendEventInstance(message);
@@ -251,13 +281,10 @@ void loop() {
     new_request = 0;
     switch (received_msg_type)  {
       case SET_VALUES: 
-        digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
-        digitalWrite(R1_GPIO, R1_status);
-        digitalWrite(PC1_GPIO, PC1_status);
-        send_reply(HUB_ACK);
+        send_message(ACK_HUB, received_msg_id);
         break;
       case STATUS:
-        send_reply(STATUS);
+        send_message(STATUS, received_msg_id);
         break;
       default:
         Serial.println("Invalid message type!");
@@ -265,4 +292,25 @@ void loop() {
         break;
     }
   }
+    if(new_status == true) {
+    new_status = false;
+    digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
+    digitalWrite(R1_GPIO, R1_status);
+    digitalWrite(PC1_GPIO, PC1_status);
+    send_message(STATUS, messageCount);
+    messageCount++;
+    }
+    if(timetosample){
+      timetosample = 0;
+        // Read status of sensors  //
+      SL2_status = digitalRead(SL2_GPIO);
+      SL3_status = digitalRead(SL3_GPIO);
+      ST1_temp = read_temperature();
+      if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp ) 
+        new_status = true;
+
+      old_SL2_status = SL2_status;
+      old_SL3_status = SL3_status;
+      old_ST1_temp = ST1_temp;
+    }
 }
