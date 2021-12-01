@@ -22,8 +22,8 @@ volatile float old_ST1_temp;
 #define DEVICE_ID "geniale board 2"   
 //// Other handy variables ////
 #define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
-#define TEMP_INTERVAL 10                                   // Interval of time in ms between two successive samples
-volatile int new_request = 0;                             // flag that tells if a new request has arrived from the hub
+#define TEMP_INTERVAL 10                                  // Interval of time in ms between two successive samples
+volatile bool new_request = false;                        // flag that tells if a new request has arrived from the hub
 volatile int received_msg_id = 0;                         // used for ack mechanism
 volatile int received_msg_type = -1;                      // if 0 the HUB wants to know the status of the device
                                                           // if 1 the HUB wants to change the status of the device (with thw values passed in the message)
@@ -68,7 +68,7 @@ int messageCount = 1;              // tells the number of the sent message
 // Create a timer to generate an ISR at a defined frequency in order to sample the system
 hw_timer_t * timer = NULL;
 #define OVF_MS 5000                      // The timer interrupt fires every 5 second
-bool new_status = false;       // When it's true a sensor has changed its value and it needs to be sent
+bool new_status = false;                 // When it's true a sensor has changed its value and it needs to be sent
 volatile bool timetosample = false; 
 
 void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow every OVF_MS
@@ -95,7 +95,7 @@ static void MessageCallback(const char* payLoad, int size)
       Serial.println(error.f_str());
     }
     else {  
-    new_request = 1;
+    new_request = true;
     received_msg_id = doc["message_id"];
     received_msg_type = doc["message_type"];
       if(received_msg_type == SET_VALUES) {
@@ -277,9 +277,9 @@ if (hasWifi && hasIoTHub)
 
 void loop() {
   Esp32MQTTClient_Check();
-  if(new_request){
-    new_request = 0;
-    switch (received_msg_type)  {
+  if(new_request == true){
+    new_request = false;
+    switch (received_msg_type) {
       case SET_VALUES: 
         send_message(ACK_HUB, received_msg_id);
         break;
@@ -292,25 +292,25 @@ void loop() {
         break;
     }
   }
-    if(new_status == true) {
-    new_status = false;
-    digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
-    digitalWrite(R1_GPIO, R1_status);
-    digitalWrite(PC1_GPIO, PC1_status);
-    send_message(STATUS, messageCount);
-    messageCount++;
-    }
-    if(timetosample){
-      timetosample = 0;
-        // Read status of sensors  //
-      SL2_status = digitalRead(SL2_GPIO);
-      SL3_status = digitalRead(SL3_GPIO);
-      ST1_temp = read_temperature();
-      if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp ) 
-        new_status = true;
+  if(new_status == true) {
+  new_status = false;
+  digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
+  digitalWrite(R1_GPIO, R1_status);
+  digitalWrite(PC1_GPIO, PC1_status);
+  send_message(STATUS, messageCount);
+  messageCount++;
+  }
+  if(timetosample == true){
+    timetosample = false;
+      // Read status of sensors  //
+    SL2_status = digitalRead(SL2_GPIO);
+    SL3_status = digitalRead(SL3_GPIO);
+    ST1_temp = read_temperature();
+    if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp ) 
+      new_status = true;
 
-      old_SL2_status = SL2_status;
-      old_SL3_status = SL3_status;
-      old_ST1_temp = ST1_temp;
-    }
+    old_SL2_status = SL2_status;
+    old_SL3_status = SL3_status;
+    old_ST1_temp = ST1_temp;
+  }
 }
