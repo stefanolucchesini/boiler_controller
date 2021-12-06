@@ -13,18 +13,31 @@ int PC1_status = 0;                                        //status of the recir
 int EV1_status = 0;                                        //status of the electrovalve 1 (0: OFF, 1: ON)
 int R1_status = 0;                                         //status of the boiler resistor (0: OFF, 1: ON)
 //// Sensors status ////
-volatile int SL2_status;
-volatile int old_SL2_status;
-volatile int SL3_status;
-volatile int old_SL3_status;
-volatile float ST1_temp;
-volatile float old_ST1_temp;
+int SL2_status, old_SL2_status;
+int SL3_status, old_SL3_status;
+float ST1_temp, old_ST1_temp;
+float Legio_temp;
 //// firmware version of the device and device id ////
 #define SW_VERSION "0.1"
 #define DEVICE_ID "geniale board 2"   
 //// Other handy variables ////
 #define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
 #define TEMP_INTERVAL 10                                  // Interval of time in ms between two successive samples
+// Variables for voltages corresponding to temperature ranges, for PT1000:
+//1250 mV correspond to 0 deg C and an ADC read of 1382
+//1450 mV correspond to 100 deg C and an ADC read of 1627
+// Temperature = M * ADC + Q
+float M = 0.408163;
+float Q = -564.081633;
+// Steinhart-Hart model coefficients
+float A = 1.107430505e-03;
+float B = 2.382284132e-04;
+float C = 0.6743610533e-07;
+// Temperature in K = 1 / (A + B*ln(R_ntc) + C*(ln(R_ntc))^3)
+//ADC_voltage = Mv*val + Qv;
+float Mv = 0.816326;
+float Qv = 121.836734;
+
 volatile bool new_request = false;                        // flag that tells if a new request has arrived from the hub
 volatile int received_msg_id = 0;                         // used for ack mechanism
 volatile int received_msg_type = -1;                      // if 0 the HUB wants to know the status of the device
@@ -34,12 +47,6 @@ volatile int received_msg_type = -1;                      // if 0 the HUB wants 
 #define STATUS 0
 #define SET_VALUES 1
 #define ACK_HUB 2
-// Variables for voltages corresponding to temperature ranges, for PT1000:
-//1250 mV correspond to 0 deg C and an ADC read of 1382
-//1450 mV correspond to 100 deg C and an ADC read of 1627
-// Temperature = M * ADC + Q
-float M = 0.408163;
-float Q = -564.081633;
 // STATUS LED HANDLING
 #define LED_CHANNEL 0
 #define RESOLUTION 8
@@ -47,6 +54,10 @@ float Q = -564.081633;
 #define OFF 0
 #define BLINK_5HZ 128
 #define ON 255
+// MOTOR ROTATION STATES
+#define STOP    0
+#define FORWARD 1
+#define REVERSE 2
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
@@ -65,6 +76,11 @@ int messageCount = 1;              // tells the number of the sent message
 #define SL2_GPIO   34               // Level sensor 2 connected to GPIO34
 #define SL3_GPIO   35               // Level sensor 3 connected to GPIO35
 #define ST1_MEASURE_GPIO   39       // Voltage measure temperature sensor 1 connected to GPIO39 (VN)
+#define TEMPSENS_LEGIO_GPIO   36    // Voltage measure legiomix's thermistor connected to GPIO36 (VP)
+#define CONTACT_LEGIO_GPIO    33    // Legiomix contact (NOT USED)
+#define MOTOR_CTRL_IN1_GPIO   25    // IN1 of BD62105 H-bridge motor driver
+#define MOTOR_CTRL_IN2_GPIO   26    // IN2 of BD62105 H-bridge motor driver
+#define MOTOR_ENCODER_GPIO    16    // Encoder GPIO
 #define LED   5                     // Status led connected to GPIO5
 
 // Create a timer to generate an ISR at a defined frequency in order to sample the system
@@ -168,8 +184,44 @@ float read_temperature() {
         delay(TEMP_INTERVAL); 
       }
   digitalWrite(ST1_FORCE_GPIO, LOW);
-  //DEBUG_SERIAL.println(String("Temperature in deg C: ") + String(mean/100, 2));
+  //DEBUG_SERIAL.println(String("Temperature in deg C: ") + String(mean/TEMP_SAMPLES, 2));
   return roundf(mean/(TEMP_SAMPLES/10)) / 10;   //return the temperature with a single decimal place
+}
+
+float read_NTC_temperature(){
+  float ADC_voltage = 0; 
+  float NTC_resistance, val, temperatureK;
+  for(int i = 0; i < TEMP_SAMPLES; i++)  {
+      val = analogRead(TEMPSENS_LEGIO_GPIO);
+      ADC_voltage += Mv*val + Qv;
+      delay(TEMP_INTERVAL);
+  }
+  ADC_voltage /= TEMP_SAMPLES;
+  //DEBUG_SERIAL.println(String("Computed ADC voltage (mV): ") + String(ADC_voltage, 2));
+  NTC_resistance = - 1000.0*ADC_voltage*(1.0 / (ADC_voltage-2500.0));
+  //DEBUG_SERIAL.println(String("Computed NTC resistance: ") + String(NTC_resistance, 2));
+  float logNTC = log(NTC_resistance);
+  temperatureK = 1.0 / (A + B*logNTC + C*logNTC*logNTC*logNTC);
+  float temperatureC = temperatureK - 273.15;
+  //DEBUG_SERIAL.println(String("NTC Temperature in deg C: ") + String(temperatureC, 2));
+  return roundf(temperatureC*10) / 10;
+}
+
+void set_motor_direction(int dir){
+  switch(dir){
+    case STOP:
+    digitalWrite(MOTOR_CTRL_IN1_GPIO, LOW);
+    digitalWrite(MOTOR_CTRL_IN2_GPIO, LOW);
+    break;
+    case FORWARD:
+    digitalWrite(MOTOR_CTRL_IN1_GPIO, HIGH);
+    digitalWrite(MOTOR_CTRL_IN2_GPIO, LOW);
+    break;
+    case REVERSE:
+    digitalWrite(MOTOR_CTRL_IN1_GPIO, LOW);
+    digitalWrite(MOTOR_CTRL_IN2_GPIO, HIGH);
+    break;
+  }
 }
 
 void setup() {
@@ -179,10 +231,17 @@ void setup() {
   pinMode(SL2_GPIO, INPUT);
   pinMode(SL3_GPIO, INPUT);
   pinMode(ST1_FORCE_GPIO, OUTPUT);
+  pinMode(TEMPSENS_LEGIO_GPIO, INPUT);
+  pinMode(CONTACT_LEGIO_GPIO, OUTPUT);
+  pinMode(MOTOR_CTRL_IN1_GPIO, OUTPUT);
+  pinMode(MOTOR_CTRL_IN2_GPIO, OUTPUT);
+  set_motor_direction(STOP);
+  pinMode(MOTOR_ENCODER_GPIO, INPUT);
   pinMode(ST1_MEASURE_GPIO, INPUT);                  // ST1 voltage measurement is done by ADC1_3
   digitalWrite(EV1_GPIO, LOW);                       // Electrovalve is normally closed
   digitalWrite(PC1_GPIO, LOW);
   digitalWrite(R1_GPIO, LOW);
+  digitalWrite(CONTACT_LEGIO_GPIO, LOW);
   digitalWrite(ST1_FORCE_GPIO, LOW);
    // configure LED PWM functionalitites
   ledcSetup(LED_CHANNEL, LED_PWM_FREQ, RESOLUTION);
@@ -306,6 +365,7 @@ void loop() {
     SL2_status = digitalRead(SL2_GPIO);
     SL3_status = digitalRead(SL3_GPIO);
     ST1_temp = read_temperature();
+    Legio_temp = read_NTC_temperature();
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp ) 
       new_status = true;
 
