@@ -461,16 +461,10 @@ void loop() {
     timetosample = false;
     // Read status of sensors  //
     SL2_status = digitalRead(SL2_GPIO);
-    if(SL2_status == HIGH)
-      boiler_too_full = true;
-    else
-      boiler_too_full = false;  
+    boiler_too_full = (SL2_status == HIGH) ? true : false;
     SL3_status = digitalRead(SL3_GPIO);
     ST1_temp = read_temperature();
-    if(ST1_temp > 90)                     // Maximum input temperature of legiomix's 3-way valve
-      boiler_overtemperature = true;
-    else 
-      boiler_overtemperature = false;  
+    boiler_overtemperature = (ST1_temp > 90) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
     legio_temp = read_NTC_temperature();    // read temperature of mixed water exiting from legiomix
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp )  new_status = true;
     old_SL2_status = SL2_status;
