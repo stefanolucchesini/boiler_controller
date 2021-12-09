@@ -25,13 +25,15 @@ float ST1_temp, old_ST1_temp;
 float legio_temp;
 int target_loop_temperature = 70;                        // Target temperature to reach 
 #define TOLERANCE 3                                      // Tolerance for which target temperature is considered reached 
+#define WAIT_TIME 30                                     // Time in seconds to wait in order to reach temperature regime
+bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1250 mV correspond to 0 deg C and an ADC read of 1382
 //1450 mV correspond to 100 deg C and an ADC read of 1627
 // Temperature = M * ADC + Q
 float M = 0.408163;
 float Q = -564.081633;
-// Steinhart-Hart model coefficients
+// Steinhart-Hart model coefficients for NTC sensor
 float A = 1.107430505e-03;
 float B = 2.382284132e-04;
 float C = 0.6743610533e-07;
@@ -63,9 +65,9 @@ volatile int received_msg_type = -1;                      // if 0 the HUB wants 
 // MOTOR CONTROL VARIABLES
 int pulses_FWD = 0;                           // used to count the pulses needed to open the valve from initial condition
 int pulses_REV = 0;                           // used to count the pulses needed to close the valve from initial condition
-#define SAFETY_LIMIT 2                            // After 2 seconds of no encoder transitions the motor is stopped 
-int old_encstatus, encstatus;                     // variables that contain the digital value read from the encoder pin
-volatile int motor_counter = 0;                   // it is increased at ISR frequency, used for safety limit
+#define SAFETY_LIMIT 2                        // After 2 seconds of no encoder transitions the motor is stopped 
+int old_encstatus, encstatus;                 // variables that contain the digital value read from the encoder pin
+volatile int motor_counter = 0;               // it is increased at ISR frequency, used for safety limit
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
@@ -90,7 +92,8 @@ int messageCount = 1;              // tells the number of the sent message
 // Create a timer to generate an ISR at a defined frequency in order to sample the system
 hw_timer_t * timer = NULL;
 #define OVF_MS 100                       // The timer interrupt fires every 100 milliseconds
-volatile int time2sample_counter = 0;      
+volatile int time2sample_counter = 0; 
+volatile int wait_for_regime_counter = 0;      
 #define SAMPLING_TIME 5                  // Sample the sensors every SAMPLING_TIME seconds
 bool new_status = false;                 // When it's true a sensor has changed its value and it needs to be sent
 volatile bool timetosample = false; 
@@ -98,10 +101,11 @@ volatile bool timetosample = false;
 void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow every OVF_MS
   time2sample_counter++;
   motor_counter++;
+  wait_for_regime_counter++;
   if(time2sample_counter >= SAMPLING_TIME*10){
     timetosample = true;
     time2sample_counter = 0;
-  }
+  }    
 }
 
 static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
@@ -362,6 +366,34 @@ void goto_central_pos_of_3wayvalve(){
     set_motor_direction(STOP);
 }
 
+void move_motor_by_steps(int dir, int steps){
+  DEBUG_SERIAL.println(String("Moving motor by ")+String(steps)+String(" steps and in direction ")+String(dir));
+    motor_counter = 0;
+    set_motor_direction(dir);
+    int count = 0;
+    while(motor_counter <= 10*SAFETY_LIMIT && count<steps){
+      encstatus = digitalRead(MOTOR_ENCODER_GPIO);
+      if(encstatus == 1 && old_encstatus == 0){
+        count++;
+        motor_counter = 0;
+      }
+      old_encstatus = encstatus;
+    }
+    if(motor_counter>10*SAFETY_LIMIT) {
+      set_motor_direction(STOP);
+      switch(dir) {
+        case FORWARD:
+        flag_alarm_fw = true;               // don't allow the motor to move further forward
+        DEBUG_SERIAL.println("Safety limit reached, the valve is fully open");
+        break;
+        case REVERSE:
+        flag_alarm_rev = true;              // don't allow the motor to move further in reverse
+        DEBUG_SERIAL.println("Safety limit reached, the valve is fully closed");
+        break;
+      }        
+    }
+  wait_for_regime_counter = 0;
+}
 
 void send_message(int reply_type, int msgid) {
 if (hasWifi && hasIoTHub)
@@ -419,7 +451,7 @@ void loop() {
     send_message(STATUS, messageCount);
     messageCount++;
   }
-  if(timetosample == true){             // sensor values are sampled every SAMPLING_TIME seconds
+  if(timetosample == true) {             // sensor values are sampled every SAMPLING_TIME seconds
     timetosample = false;
     // Read status of sensors  //
     SL2_status = digitalRead(SL2_GPIO);
@@ -431,4 +463,13 @@ void loop() {
     old_SL3_status = SL3_status;
     old_ST1_temp = ST1_temp;
   }
+  // Legiomix control routine 
+  if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false){
+    move_motor_by_steps(FORWARD, 1);
+    }
+  else if(legio_temp < target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false){
+    move_motor_by_steps(REVERSE, 1);
+  }
+  else 
+    set_motor_direction(STOP); 
 }
