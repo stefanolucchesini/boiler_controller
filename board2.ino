@@ -15,14 +15,16 @@ int R1_status = 0;                                         //status of the boile
 //// Sensors status ////
 int SL2_status, old_SL2_status;
 int SL3_status, old_SL3_status;
-float ST1_temp, old_ST1_temp;
-float Legio_temp;
 //// firmware version of the device and device id ////
 #define SW_VERSION "0.1"
 #define DEVICE_ID "geniale board 2"   
-//// Other handy variables ////
+//// Temperature variables and defines ////
 #define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
 #define TEMP_INTERVAL 10                                  // Interval of time in ms between two successive samples
+float ST1_temp, old_ST1_temp;
+float legio_temp;
+int target_loop_temperature = 70;                        // Target temperature to reach 
+#define TOLERANCE 3                                      // Tolerance for which target temperature is considered reached 
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1250 mV correspond to 0 deg C and an ADC read of 1382
 //1450 mV correspond to 100 deg C and an ADC read of 1627
@@ -58,16 +60,18 @@ volatile int received_msg_type = -1;                      // if 0 the HUB wants 
 #define STOP    0
 #define FORWARD 1
 #define REVERSE 2
+// MOTOR CONTROL VARIABLES
+int pulses_FWD = 0;                           // used to count the pulses needed to open the valve from initial condition
+int pulses_REV = 0;                           // used to count the pulses needed to close the valve from initial condition
+#define SAFETY_LIMIT 2                            // After 2 seconds of no encoder transitions the motor is stopped 
+int old_encstatus, encstatus;                     // variables that contain the digital value read from the encoder pin
+volatile int motor_counter = 0;                   // it is increased at ISR frequency, used for safety limit
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
 static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
 static bool hasIoTHub = false;
 static bool hasWifi = false;
-//#define INTERVAL 10000             // IoT message sending interval in ms
 #define MESSAGE_MAX_LEN 256
 int messageCount = 1;              // tells the number of the sent message
-//static bool messageSending = true;
-//static uint64_t send_interval_ms;
-
 ////  I/Os definitions    ////
 #define EV1_GPIO   18               // Electrovalve 1 connected to GPIO18
 #define PC1_GPIO   17               // Recirculation pump PC1 connected to GPIO17
@@ -85,12 +89,19 @@ int messageCount = 1;              // tells the number of the sent message
 
 // Create a timer to generate an ISR at a defined frequency in order to sample the system
 hw_timer_t * timer = NULL;
-#define OVF_MS 5000                      // The timer interrupt fires every 5 second
+#define OVF_MS 100                       // The timer interrupt fires every 100 milliseconds
+volatile int time2sample_counter = 0;      
+#define SAMPLING_TIME 5                  // Sample the sensors every SAMPLING_TIME seconds
 bool new_status = false;                 // When it's true a sensor has changed its value and it needs to be sent
 volatile bool timetosample = false; 
 
 void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow every OVF_MS
-  timetosample = true;
+  time2sample_counter++;
+  motor_counter++;
+  if(time2sample_counter >= SAMPLING_TIME*10){
+    timetosample = true;
+    time2sample_counter = 0;
+  }
 }
 
 static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
@@ -120,6 +131,7 @@ static void MessageCallback(const char* payLoad, int size)
           PC1_status = doc["PC1"];
           R1_status = doc["R1"];
           EV1_status = doc["EV1"];
+          target_loop_temperature = doc["STloop_target"];
       }
     }
   }
@@ -228,30 +240,42 @@ void setup() {
   pinMode(EV1_GPIO, OUTPUT);
   pinMode(PC1_GPIO, OUTPUT);     
   pinMode(R1_GPIO, OUTPUT);
-  pinMode(SL2_GPIO, INPUT);
-  pinMode(SL3_GPIO, INPUT);
   pinMode(ST1_FORCE_GPIO, OUTPUT);
-  pinMode(TEMPSENS_LEGIO_GPIO, INPUT);
   pinMode(CONTACT_LEGIO_GPIO, OUTPUT);
   pinMode(MOTOR_CTRL_IN1_GPIO, OUTPUT);
   pinMode(MOTOR_CTRL_IN2_GPIO, OUTPUT);
   set_motor_direction(STOP);
-  pinMode(MOTOR_ENCODER_GPIO, INPUT);
-  pinMode(ST1_MEASURE_GPIO, INPUT);                  // ST1 voltage measurement is done by ADC1_3
   digitalWrite(EV1_GPIO, LOW);                       // Electrovalve is normally closed
   digitalWrite(PC1_GPIO, LOW);
   digitalWrite(R1_GPIO, LOW);
   digitalWrite(CONTACT_LEGIO_GPIO, LOW);
   digitalWrite(ST1_FORCE_GPIO, LOW);
+  pinMode(SL2_GPIO, INPUT);
+  pinMode(SL3_GPIO, INPUT);
+  pinMode(TEMPSENS_LEGIO_GPIO, INPUT);
+  pinMode(MOTOR_ENCODER_GPIO, INPUT);
+  pinMode(ST1_MEASURE_GPIO, INPUT);                  // ST1 voltage measurement is done by ADC1_3
+  old_encstatus = digitalRead(MOTOR_ENCODER_GPIO);
    // configure LED PWM functionalitites
   ledcSetup(LED_CHANNEL, LED_PWM_FREQ, RESOLUTION);
   ledcAttachPin(LED, LED_CHANNEL);                              // Attach PWM module to status LED
   ledcWrite(LED_CHANNEL, BLINK_5HZ);                            // LED initially blinks at 5Hz
-  
   DEBUG_SERIAL.begin(115200);
-  DEBUG_SERIAL.println("Starting connecting WiFi.");
   delay(10);
-
+   /* Use 1st timer of 4 */
+  /* 1 tick take 1/(80MHZ/80) = 1us so we set divider 80 and count up */
+  timer = timerBegin(0, 80, true);
+  /* Attach onTimer function to our timer */
+  timerAttachInterrupt(timer, &onTimer, true);
+  /* Set alarm to call onTimer function every OVF_MS milliseconds. 
+  1 tick is 1us*/
+  /* Repeat the alarm (third parameter) */
+  timerAlarmWrite(timer, 1000*OVF_MS, true);
+  /* Start an alarm */
+  timerAlarmEnable(timer);
+  DEBUG_SERIAL.println("ISR Timer started");
+  goto_central_pos_of_3wayvalve();
+  DEBUG_SERIAL.println("Starting connecting WiFi.");
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
   WiFiManager wm;
   //wm.resetSettings();  // reset settings - wipe stored credentials for testing
@@ -289,21 +313,55 @@ void setup() {
   //Esp32MQTTClient_SetDeviceMethodCallback(DeviceMethodCallback);
   randomSeed(analogRead(0));
   //send_interval_ms = millis();
-  /* Use 1st timer of 4 */
-  /* 1 tick take 1/(80MHZ/80) = 1us so we set divider 80 and count up */
-  timer = timerBegin(0, 80, true);
-  /* Attach onTimer function to our timer */
-  timerAttachInterrupt(timer, &onTimer, true);
-  /* Set alarm to call onTimer function every OVF_MS milliseconds. 
-  1 tick is 1us*/
-  /* Repeat the alarm (third parameter) */
-  timerAlarmWrite(timer, 1000*OVF_MS, true);
-  /* Start an alarm */
-  timerAlarmEnable(timer);
-  DEBUG_SERIAL.println("ISR Timer started");
   ledcWrite(LED_CHANNEL, OFF);
   DEBUG_SERIAL.println("Waiting for messages from HUB...");
 }
+
+// Search the number of pulses needed to open totally the valve and close totally the valve
+void goto_central_pos_of_3wayvalve(){
+    DEBUG_SERIAL.println("Searching impulses needed to open and close the valve");
+    motor_counter = 0;
+    set_motor_direction(FORWARD);
+    while(motor_counter <= 10*SAFETY_LIMIT){
+      encstatus = digitalRead(MOTOR_ENCODER_GPIO);
+      if(encstatus == 1 && old_encstatus == 0){
+        pulses_FWD++;
+        motor_counter = 0;
+      }
+      old_encstatus = encstatus;
+    }
+    DEBUG_SERIAL.println(String("Forward impulses: ") + String(pulses_FWD));
+    motor_counter = 0;
+    set_motor_direction(REVERSE);
+    while(motor_counter <= 10*SAFETY_LIMIT){
+      encstatus = digitalRead(MOTOR_ENCODER_GPIO);
+      if(encstatus == 1 && old_encstatus == 0){
+        pulses_REV++;
+        motor_counter = 0;
+      }
+      old_encstatus = encstatus;
+    }
+    DEBUG_SERIAL.println(String("Reverse impulses: ") + String(pulses_REV));
+    int mean_pulses = (pulses_FWD + pulses_REV) / 2;
+    set_motor_direction(FORWARD);
+    DEBUG_SERIAL.println(String("Moving valve to the center at ") + String(mean_pulses));
+    int index = 0;
+    motor_counter = 0;
+    while(motor_counter <= 10*SAFETY_LIMIT){
+      encstatus = digitalRead(MOTOR_ENCODER_GPIO);
+      if(encstatus == 1 && old_encstatus == 0){
+        index++;
+        motor_counter = 0;
+      }
+      if(index >= mean_pulses) {
+        DEBUG_SERIAL.println("Center reached");
+        break;
+      }
+      old_encstatus = encstatus;
+    }
+    set_motor_direction(STOP);
+}
+
 
 void send_message(int reply_type, int msgid) {
 if (hasWifi && hasIoTHub)
@@ -317,6 +375,8 @@ if (hasWifi && hasIoTHub)
       msgtosend["SL2"] = SL2_status;
       msgtosend["SL3"] = SL3_status;
       msgtosend["ST1"] = ST1_temp;
+      msgtosend["STloop"] = legio_temp;
+      msgtosend["STloop_target"] = target_loop_temperature;
       msgtosend["EV1"] = EV1_status;      
       msgtosend["R1"] = R1_status;
       msgtosend["PC1"] = PC1_status;
@@ -336,10 +396,13 @@ if (hasWifi && hasIoTHub)
 
 void loop() {
   Esp32MQTTClient_Check();
-  if(new_request == true){
+  if(new_request == true){            // received message from HUB
     new_request = false;
     switch (received_msg_type) {
       case SET_VALUES: 
+        digitalWrite(EV1_GPIO, EV1_status);                   //Set output states depending on messages
+        digitalWrite(R1_GPIO, R1_status);
+        digitalWrite(PC1_GPIO, PC1_status);
         send_message(ACK_HUB, received_msg_id);
         break;
       case STATUS:
@@ -351,24 +414,19 @@ void loop() {
         break;
     }
   }
-  if(new_status == true) {
-  new_status = false;
-  digitalWrite(EV1_GPIO, EV1_status);                         //Set contact state depending on messages
-  digitalWrite(R1_GPIO, R1_status);
-  digitalWrite(PC1_GPIO, PC1_status);
-  send_message(STATUS, messageCount);
-  messageCount++;
+  if(new_status == true) {                 // the value read from one or more sensors is changed, notify the HUB
+    new_status = false;
+    send_message(STATUS, messageCount);
+    messageCount++;
   }
-  if(timetosample == true){
+  if(timetosample == true){             // sensor values are sampled every SAMPLING_TIME seconds
     timetosample = false;
-      // Read status of sensors  //
+    // Read status of sensors  //
     SL2_status = digitalRead(SL2_GPIO);
     SL3_status = digitalRead(SL3_GPIO);
     ST1_temp = read_temperature();
-    Legio_temp = read_NTC_temperature();
-    if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp ) 
-      new_status = true;
-
+    legio_temp = read_NTC_temperature();    // read temperature of mixed water exiting from legiomix
+    if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp )  new_status = true;
     old_SL2_status = SL2_status;
     old_SL3_status = SL3_status;
     old_ST1_temp = ST1_temp;
