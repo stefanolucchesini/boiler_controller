@@ -27,6 +27,8 @@ int target_loop_temperature = 70;                        // Target temperature t
 #define TOLERANCE 3                                      // Tolerance for which target temperature is considered reached 
 #define WAIT_TIME 30                                     // Time in seconds to wait in order to reach temperature regime
 bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
+bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
+bool boiler_too_full = false;                              // If SL2 level is high the electrovalve opening is disabled
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1250 mV correspond to 0 deg C and an ADC read of 1382
 //1450 mV correspond to 100 deg C and an ADC read of 1627
@@ -105,7 +107,11 @@ void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow ever
   if(time2sample_counter >= SAMPLING_TIME*10){
     timetosample = true;
     time2sample_counter = 0;
-  }    
+  }
+  if(boiler_overtemperature == true)         // disable boiler heater if temperature is too hot
+      digitalWrite(R1_GPIO, LOW);    
+  if(boiler_too_full == true)
+      digitalWrite(EV1_GPIO, LOW);           // keep electrovalve closed if boiler is too full    
 }
 
 static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
@@ -432,8 +438,8 @@ void loop() {
     new_request = false;
     switch (received_msg_type) {
       case SET_VALUES: 
-        digitalWrite(EV1_GPIO, EV1_status);                   //Set output states depending on messages
-        digitalWrite(R1_GPIO, R1_status);
+        digitalWrite(EV1_GPIO, EV1_status);       
+        digitalWrite(R1_GPIO, R1_status);  
         digitalWrite(PC1_GPIO, PC1_status);
         send_message(ACK_HUB, received_msg_id);
         break;
@@ -455,8 +461,16 @@ void loop() {
     timetosample = false;
     // Read status of sensors  //
     SL2_status = digitalRead(SL2_GPIO);
+    if(SL2_status == HIGH)
+      boiler_too_full = true;
+    else
+      boiler_too_full = false;  
     SL3_status = digitalRead(SL3_GPIO);
     ST1_temp = read_temperature();
+    if(ST1_temp > 90)                     // Maximum input temperature of legiomix's 3-way valve
+      boiler_overtemperature = true;
+    else 
+      boiler_overtemperature = false;  
     legio_temp = read_NTC_temperature();    // read temperature of mixed water exiting from legiomix
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp )  new_status = true;
     old_SL2_status = SL2_status;
@@ -465,11 +479,11 @@ void loop() {
   }
   // Legiomix control routine 
   if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false){
-    move_motor_by_steps(FORWARD, 1);
+    move_motor_by_steps(FORWARD, 1);   // Arguments: direcion, number of steps in that direction
     }
   else if(legio_temp < target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false){
     move_motor_by_steps(REVERSE, 1);
   }
   else 
-    set_motor_direction(STOP); 
+    set_motor_direction(STOP);    // temperature is ok, don't move the motor
 }
