@@ -62,8 +62,8 @@ volatile int received_msg_type = -1;                      // if 0 the HUB wants 
 #define ON 255
 // MOTOR ROTATION STATES
 #define STOP    0
-#define FORWARD 1
-#define REVERSE 2
+#define FORWARD 1                             // Tends to close the 3-way valve
+#define REVERSE 2                             // Tends to open the 3-way valve
 // MOTOR CONTROL VARIABLES
 int pulses_FWD = 0;                           // used to count the pulses needed to open the valve from initial condition
 int pulses_REV = 0;                           // used to count the pulses needed to close the valve from initial condition
@@ -271,7 +271,7 @@ void setup() {
   ledcAttachPin(LED, LED_CHANNEL);                              // Attach PWM module to status LED
   ledcWrite(LED_CHANNEL, BLINK_5HZ);                            // LED initially blinks at 5Hz
   DEBUG_SERIAL.begin(115200);
-  delay(10);
+  delay(100);
    /* Use 1st timer of 4 */
   /* 1 tick take 1/(80MHZ/80) = 1us so we set divider 80 and count up */
   timer = timerBegin(0, 80, true);
@@ -330,62 +330,83 @@ void setup() {
 // Search the number of pulses needed to open totally the valve and close totally the valve
 void goto_central_pos_of_3wayvalve(){
     DEBUG_SERIAL.println("Searching impulses needed to open and close the valve");
-    motor_counter = 0;
+    delay(1000);
     set_motor_direction(FORWARD);
+    delay(500);                                // wait for electromechanical transient to end
+    motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
       encstatus = digitalRead(MOTOR_ENCODER_GPIO);
-      if(encstatus == 1 && old_encstatus == 0){
+      if(encstatus != old_encstatus){
         pulses_FWD++;
+        delay(100);
         motor_counter = 0;
       }
       old_encstatus = encstatus;
     }
-    DEBUG_SERIAL.println(String("Forward impulses: ") + String(pulses_FWD));
-    motor_counter = 0;
+    pulses_FWD /= 2;
+    DEBUG_SERIAL.println(String("Pulses forward: ")+String(pulses_FWD));
+    if(motor_counter >= 10*SAFETY_LIMIT)
+      DEBUG_SERIAL.println("Forward limit reached");
+    set_motor_direction(STOP);
+    delay(1000);
     set_motor_direction(REVERSE);
+    delay(500);
+    motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
       encstatus = digitalRead(MOTOR_ENCODER_GPIO);
-      if(encstatus == 1 && old_encstatus == 0){
+      if(encstatus != old_encstatus){
         pulses_REV++;
+        delay(100);
         motor_counter = 0;
       }
       old_encstatus = encstatus;
     }
-    DEBUG_SERIAL.println(String("Reverse impulses: ") + String(pulses_REV));
+    pulses_REV /= 2;                            // HtoL AND LtoH transitions are counted
+    DEBUG_SERIAL.println(String("Pulses reverse: ")+String(pulses_REV));
+    if(motor_counter >= 10*SAFETY_LIMIT)
+      DEBUG_SERIAL.println("Reverse limit reached");
     int mean_pulses = (pulses_FWD + pulses_REV) / 2;
+    set_motor_direction(STOP);
+    delay(1000);
     set_motor_direction(FORWARD);
+    delay(500);
     DEBUG_SERIAL.println(String("Moving valve to the center at ") + String(mean_pulses));
     int index = 0;
     motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
       encstatus = digitalRead(MOTOR_ENCODER_GPIO);
-      if(encstatus == 1 && old_encstatus == 0){
+      if(encstatus != old_encstatus){
         index++;
+        delay(100);
         motor_counter = 0;
       }
-      if(index >= mean_pulses) {
-        DEBUG_SERIAL.println("Center reached");
+      if(index >= 2*mean_pulses) {
+        DEBUG_SERIAL.println(String("Center reached at ")+String(index/2));
         break;
       }
       old_encstatus = encstatus;
     }
     set_motor_direction(STOP);
+    if(motor_counter >= 10*SAFETY_LIMIT)
+      DEBUG_SERIAL.println("Safety limit reached");
 }
 
 void move_motor_by_steps(int dir, int steps){
   DEBUG_SERIAL.println(String("Moving motor by ")+String(steps)+String(" steps and in direction ")+String(dir));
-    motor_counter = 0;
     set_motor_direction(dir);
+    delay(500);
     int count = 0;
+    motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT && count<steps){
       encstatus = digitalRead(MOTOR_ENCODER_GPIO);
-      if(encstatus == 1 && old_encstatus == 0){
+      if(encstatus != old_encstatus){
         count++;
         motor_counter = 0;
+        delay(100);
       }
       old_encstatus = encstatus;
     }
-    if(motor_counter>10*SAFETY_LIMIT) {
+    if(motor_counter >= 10*SAFETY_LIMIT) {
       set_motor_direction(STOP);
       switch(dir) {
         case FORWARD:
@@ -472,6 +493,8 @@ void loop() {
     old_ST1_temp = ST1_temp;
   }
   // Legiomix control routine 
+  // Open valve ---> HOT water. REVERSE tends to open the valve
+  // Closed valve ---> COLD water. FORWARD tends to close the valve
   if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false){
     move_motor_by_steps(FORWARD, 1);   // Arguments: direcion, number of steps in that direction
     }
