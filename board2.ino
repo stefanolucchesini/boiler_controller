@@ -28,7 +28,7 @@ int target_loop_temperature = 70;                        // Target temperature t
 #define WAIT_TIME 30                                     // Time in seconds to wait in order to reach temperature regime
 bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
-bool boiler_too_full = false;                              // If SL2 level is high the electrovalve opening is disabled
+bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
 // Variables for voltages corresponding to temperature ranges, for PT1000:
 //1250 mV correspond to 0 deg C and an ADC read of 1382
 //1450 mV correspond to 100 deg C and an ADC read of 1627
@@ -40,7 +40,7 @@ float A = 1.107430505e-03;
 float B = 2.382284132e-04;
 float C = 0.6743610533e-07;
 // Temperature in K = 1 / (A + B*ln(R_ntc) + C*(ln(R_ntc))^3)
-//ADC_voltage = Mv*val + Qv;
+//ADC_voltage = Mv*val + Qv; Value in mV
 float Mv = 0.816326;
 float Qv = 121.836734;
 
@@ -271,7 +271,6 @@ void setup() {
   ledcAttachPin(LED, LED_CHANNEL);                              // Attach PWM module to status LED
   ledcWrite(LED_CHANNEL, BLINK_5HZ);                            // LED initially blinks at 5Hz
   DEBUG_SERIAL.begin(115200);
-  delay(100);
    /* Use 1st timer of 4 */
   /* 1 tick take 1/(80MHZ/80) = 1us so we set divider 80 and count up */
   timer = timerBegin(0, 80, true);
@@ -302,7 +301,7 @@ void setup() {
       //if you get here you have connected to the WiFi    
       DEBUG_SERIAL.println("Connected to wifi!");
       ledcWrite(LED_CHANNEL, ON);
-      // Wait for ezTime to get its time synchronized
+      DEBUG_SERIAL.println("Wait for ezTime to get its time synchronized");
 	    waitForSync();
       DEBUG_SERIAL.println("UTC Time in ISO8601: " + UTC.dateTime(ISO8601));
       hasWifi = true;
@@ -329,8 +328,7 @@ void setup() {
 
 // Search the number of pulses needed to open totally the valve and close totally the valve
 void goto_central_pos_of_3wayvalve(){
-    DEBUG_SERIAL.println("Searching impulses needed to open and close the valve");
-    delay(1000);
+    DEBUG_SERIAL.println("Searching number of impulses needed to close the valve");
     set_motor_direction(FORWARD);
     delay(500);                                // wait for electromechanical transient to end
     motor_counter = 0;
@@ -344,9 +342,10 @@ void goto_central_pos_of_3wayvalve(){
       old_encstatus = encstatus;
     }
     pulses_FWD /= 2;
-    DEBUG_SERIAL.println(String("Pulses forward: ")+String(pulses_FWD));
+    DEBUG_SERIAL.println(String("Pulses needed to close: ")+String(pulses_FWD));
     if(motor_counter >= 10*SAFETY_LIMIT)
-      DEBUG_SERIAL.println("Forward limit reached");
+      DEBUG_SERIAL.println("Valve is fully closed");
+    DEBUG_SERIAL.println("Searching number of impulses needed to open the valve");
     set_motor_direction(STOP);
     delay(1000);
     set_motor_direction(REVERSE);
@@ -362,15 +361,15 @@ void goto_central_pos_of_3wayvalve(){
       old_encstatus = encstatus;
     }
     pulses_REV /= 2;                            // HtoL AND LtoH transitions are counted
-    DEBUG_SERIAL.println(String("Pulses reverse: ")+String(pulses_REV));
+    DEBUG_SERIAL.println(String("Pulses needed to open: ")+String(pulses_REV));
     if(motor_counter >= 10*SAFETY_LIMIT)
-      DEBUG_SERIAL.println("Reverse limit reached");
+      DEBUG_SERIAL.println("Valve fully open");
     int mean_pulses = (pulses_FWD + pulses_REV) / 2;
     set_motor_direction(STOP);
     delay(1000);
     set_motor_direction(FORWARD);
     delay(500);
-    DEBUG_SERIAL.println(String("Moving valve to the center at ") + String(mean_pulses));
+    DEBUG_SERIAL.println(String("Moving to half closed half open position ") + String(mean_pulses));
     int index = 0;
     motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
@@ -388,7 +387,7 @@ void goto_central_pos_of_3wayvalve(){
     }
     set_motor_direction(STOP);
     if(motor_counter >= 10*SAFETY_LIMIT)
-      DEBUG_SERIAL.println("Safety limit reached");
+      DEBUG_SERIAL.println("Encoder error!");
 }
 
 void move_motor_by_steps(int dir, int steps){
