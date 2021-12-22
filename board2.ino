@@ -29,13 +29,7 @@ int target_loop_temperature = 70;                        // Target temperature t
 bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
 bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
-// Variables for voltages corresponding to temperature ranges, for PT1000:
-//1250 mV correspond to 0 deg C and an ADC read of 1382
-//1450 mV correspond to 100 deg C and an ADC read of 1627
-// Temperature = M * ADC + Q
-float M = 0.408163;
-float Q = -564.081633;
-// Steinhart-Hart model coefficients for NTC sensor
+// Steinhart-Hart model coefficients for NTC sensors
 float A = 1.107430505e-03;
 float B = 2.382284132e-04;
 float C = 0.6743610533e-07;
@@ -83,7 +77,7 @@ int messageCount = 1;              // tells the number of the sent message
 #define ST1_FORCE_GPIO   32         // Voltage force to temperature sensor 1 connected to GPIO32
 #define SL2_GPIO   34               // Level sensor 2 connected to GPIO34
 #define SL3_GPIO   35               // Level sensor 3 connected to GPIO35
-#define ST1_MEASURE_GPIO   39       // Voltage measure temperature sensor 1 connected to GPIO39 (VN)
+#define ST1_MEASURE_GPIO   39       // Voltage measure temperature sensor 1 (thermistor) connected to GPIO39 (VN)
 #define TEMPSENS_LEGIO_GPIO   36    // Voltage measure legiomix's thermistor connected to GPIO36 (VP)
 #define CONTACT_LEGIO_GPIO    33    // Legiomix contact (NOT USED)
 #define MOTOR_CTRL_IN1_GPIO   25    // IN1 of BD62105 H-bridge motor driver
@@ -194,33 +188,20 @@ static void DeviceTwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsig
   }
 */
 
-float read_temperature() {
+float read_NTC_temperature(int channel){
   digitalWrite(ST1_FORCE_GPIO, HIGH);
-  float mean = 0;
-  float val, temperaturec;
-    // acquire TEMP_SAMPLES samples and compute mean
-    for(int i = 0; i < TEMP_SAMPLES; i++)  {
-        val = analogRead(ST1_MEASURE_GPIO);
-        temperaturec = M * val + Q;
-        mean += temperaturec;
-        delay(TEMP_INTERVAL); 
-      }
-  digitalWrite(ST1_FORCE_GPIO, LOW);
-  //DEBUG_SERIAL.println(String("Temperature in deg C: ") + String(mean/TEMP_SAMPLES, 2));
-  return roundf(mean/(TEMP_SAMPLES/10)) / 10;   //return the temperature with a single decimal place
-}
-
-float read_NTC_temperature(){
   float ADC_voltage = 0; 
   float NTC_resistance, val, temperatureK;
   for(int i = 0; i < TEMP_SAMPLES; i++)  {
-      val = analogRead(TEMPSENS_LEGIO_GPIO);
+      val = analogRead(channel);
       ADC_voltage += Mv*val + Qv;
       delay(TEMP_INTERVAL);
-  }
+  }  
+  digitalWrite(ST1_FORCE_GPIO, LOW);
   ADC_voltage /= TEMP_SAMPLES;
+  //DEBUG_SERIAL.println(String("GPIO num: ") + String(channel));
   //DEBUG_SERIAL.println(String("Computed ADC voltage (mV): ") + String(ADC_voltage, 2));
-  NTC_resistance = - 1000.0*ADC_voltage*(1.0 / (ADC_voltage-2500.0));
+  NTC_resistance = - 33000.0*ADC_voltage*(1.0 / (ADC_voltage-5000.0));
   //DEBUG_SERIAL.println(String("Computed NTC resistance: ") + String(NTC_resistance, 2));
   float logNTC = log(NTC_resistance);
   temperatureK = 1.0 / (A + B*logNTC + C*logNTC*logNTC*logNTC);
@@ -483,9 +464,9 @@ void loop() {
     SL2_status = digitalRead(SL2_GPIO);
     boiler_too_full = (SL2_status == HIGH) ? true : false;
     SL3_status = digitalRead(SL3_GPIO);
-    ST1_temp = read_temperature();
+    ST1_temp = read_NTC_temperature(ST1_MEASURE_GPIO); 
     boiler_overtemperature = (ST1_temp > 90) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
-    legio_temp = read_NTC_temperature();    // read temperature of mixed water exiting from legiomix
+    legio_temp = read_NTC_temperature(TEMPSENS_LEGIO_GPIO);    // read temperature of mixed water exiting from legiomix
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp )  new_status = true;
     old_SL2_status = SL2_status;
     old_SL3_status = SL3_status;
