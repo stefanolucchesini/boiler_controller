@@ -65,7 +65,7 @@ int pulses_REV = 0;                           // used to count the pulses needed
 int old_encstatus, encstatus;                 // variables that contain the digital value read from the encoder pin
 volatile int motor_counter = 0;               // it is increased at ISR frequency, used for safety limit
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
-static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000001;SharedAccessKey=Cn4UylzZVDZD8UGzCTJazR3A9lRLnB+CbK6NkHxCIMk=";
+static const char* connectionString = "HostName=geniale-iothub.azure-devices.net;DeviceId=00000002;SharedAccessKey=t3dpZBvo1oW87B29lfbGj7ywM0PH+UhpyyEGFFy8I/c=";
 static bool hasIoTHub = false;
 static bool hasWifi = false;
 #define MESSAGE_MAX_LEN 256
@@ -120,6 +120,7 @@ static void MessageCallback(const char* payLoad, int size)
 {
   ledcWrite(LED_CHANNEL, ON);
   DEBUG_SERIAL.println("Received message from HUB");
+  //DEBUG_SERIAL.println(payLoad);
   if (size < 256) { 
     StaticJsonDocument<256> doc;
     DeserializationError error = deserializeJson(doc, payLoad);
@@ -475,10 +476,10 @@ void loop() {
   // Legiomix control routine 
   // Open valve ---> HOT water. REVERSE tends to open the valve
   // Closed valve ---> COLD water. FORWARD tends to close the valve
-  if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false){
+  if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false && PC1_status == 1){
     move_motor_by_steps(FORWARD, 1);   // Arguments: direcion, number of steps in that direction
     }
-  else if(legio_temp < target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false){
+  else if(legio_temp < target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false && PC1_status == 1){
     move_motor_by_steps(REVERSE, 1);
   }
   else 
