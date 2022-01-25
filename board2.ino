@@ -16,15 +16,16 @@ int R1_status = 0;                                         //status of the boile
 int SL2_status, old_SL2_status;
 int SL3_status, old_SL3_status;
 //// firmware version of the device and device id ////
-#define SW_VERSION "0.1"
-#define DEVICE_ID "geniale board 2"   
+#define SW_VERSION "0.2"
+#define DEVICE_TYPE "SC2"     
+#define DEVICE_ID 00000002
 //// Temperature variables and defines ////
 #define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
 #define TEMP_INTERVAL 10                                  // Interval of time in ms between two successive samples
 float ST1_temp, old_ST1_temp;
-float legio_temp;
+float legio_temp, old_legio_temp;
 int target_loop_temperature = 70;                        // Target temperature to reach 
-#define TOLERANCE 3                                      // Tolerance for which target temperature is considered reached 
+#define TOLERANCE 0.5                                      // Tolerance for which target temperature is considered reached 
 #define WAIT_TIME 30                                     // Time in seconds to wait in order to reach temperature regime
 bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
@@ -37,6 +38,7 @@ float C = 0.6743610533e-07;
 //ADC_voltage = Mv*val + Qv; Value in mV
 float Mv = 0.816326;
 float Qv = 121.836734;
+#define R_UP_TEMP 33000.0                                  // Upper resistance of the voltage partitioner used to measure the NTC resistance     
 
 volatile bool new_request = false;                        // flag that tells if a new request has arrived from the hub
 volatile int received_msg_id = 0;                         // used for ack mechanism
@@ -61,7 +63,7 @@ volatile int received_msg_type = -1;                      // if 0 the HUB wants 
 // MOTOR CONTROL VARIABLES
 int pulses_FWD = 0;                           // used to count the pulses needed to open the valve from initial condition
 int pulses_REV = 0;                           // used to count the pulses needed to close the valve from initial condition
-#define SAFETY_LIMIT 2                        // After 2 seconds of no encoder transitions the motor is stopped 
+#define SAFETY_LIMIT 1.5                      // After 1.5 seconds of no encoder transitions the motor is stopped 
 int old_encstatus, encstatus;                 // variables that contain the digital value read from the encoder pin
 volatile int motor_counter = 0;               // it is increased at ISR frequency, used for safety limit
 ////  MICROSOFT AZURE IOT DEFINITIONS   ////
@@ -98,14 +100,17 @@ void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow ever
   time2sample_counter++;
   motor_counter++;
   wait_for_regime_counter++;
+  if(digitalRead(SL2_GPIO) == HIGH)  // keep electrovalve closed if boiler is too full (redundant)
+  {               
+    EV1_status = 0;                         
+    digitalWrite(EV1_GPIO, EV1_status);  
+  }
+  if(boiler_too_full == true)
+      digitalWrite(EV1_GPIO, LOW);           // keep electrovalve closed if boiler is too full  
   if(time2sample_counter >= SAMPLING_TIME*10){
     timetosample = true;
     time2sample_counter = 0;
-  }
-  if(boiler_overtemperature == true)         // disable boiler heater if temperature is too hot
-      digitalWrite(R1_GPIO, LOW);    
-  if(boiler_too_full == true)
-      digitalWrite(EV1_GPIO, LOW);           // keep electrovalve closed if boiler is too full    
+  } 
 }
 
 static void SendConfirmationCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result)
@@ -202,7 +207,7 @@ float read_NTC_temperature(int channel){
   ADC_voltage /= TEMP_SAMPLES;
   //DEBUG_SERIAL.println(String("GPIO num: ") + String(channel));
   //DEBUG_SERIAL.println(String("Computed ADC voltage (mV): ") + String(ADC_voltage, 2));
-  NTC_resistance = - 33000.0*ADC_voltage*(1.0 / (ADC_voltage-5000.0));
+  NTC_resistance = - (R_UP_TEMP*ADC_voltage) / (ADC_voltage-5000.0);
   //DEBUG_SERIAL.println(String("Computed NTC resistance: ") + String(NTC_resistance, 2));
   float logNTC = log(NTC_resistance);
   temperatureK = 1.0 / (A + B*logNTC + C*logNTC*logNTC*logNTC);
@@ -410,6 +415,7 @@ if (hasWifi && hasIoTHub)
       msgtosend["message_id"] = msgid;
       msgtosend["timestamp"] = UTC.dateTime(ISO8601);
       msgtosend["message_type"] = reply_type;
+      msgtosend["device_type"] = DEVICE_TYPE;
       msgtosend["device_id"] = DEVICE_ID;
       msgtosend["iot_module_software_version"] = SW_VERSION;
       msgtosend["SL2"] = SL2_status;
@@ -439,8 +445,8 @@ void loop() {
   if(new_request == true){            // received message from HUB
     new_request = false;
     switch (received_msg_type) {
-      case SET_VALUES: 
-        digitalWrite(EV1_GPIO, EV1_status);       
+      case SET_VALUES:                    
+        digitalWrite(EV1_GPIO, EV1_status);        
         digitalWrite(R1_GPIO, R1_status);  
         digitalWrite(PC1_GPIO, PC1_status);
         send_message(ACK_HUB, received_msg_id);
@@ -464,22 +470,35 @@ void loop() {
     // Read status of sensors  //
     SL2_status = digitalRead(SL2_GPIO);
     boiler_too_full = (SL2_status == HIGH) ? true : false;
+    if(boiler_too_full == true)                // keep electrovalve closed if boiler is too full    
+    {
+        EV1_status = 0;                         
+        digitalWrite(EV1_GPIO, EV1_status);
+        DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");
+    }
     SL3_status = digitalRead(SL3_GPIO);
     ST1_temp = read_NTC_temperature(ST1_MEASURE_GPIO); 
-    boiler_overtemperature = (ST1_temp > 90) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
+    boiler_overtemperature = (ST1_temp >= 90) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
+    if(boiler_overtemperature == true)         // disable boiler heater if temperature is too hot
+    {
+        R1_status = 0;   
+        digitalWrite(R1_GPIO, R1_status);  
+        DEBUG_SERIAL.println("Water in boiler is too hot, disabling heating");
+    }
     legio_temp = read_NTC_temperature(TEMPSENS_LEGIO_GPIO);    // read temperature of mixed water exiting from legiomix
-    if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp )  new_status = true;
+    if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp || legio_temp != old_legio_temp)  new_status = true;
     old_SL2_status = SL2_status;
     old_SL3_status = SL3_status;
     old_ST1_temp = ST1_temp;
+    old_legio_temp = legio_temp;
   }
   // Legiomix control routine 
   // Open valve ---> HOT water. REVERSE tends to open the valve
   // Closed valve ---> COLD water. FORWARD tends to close the valve
-  if(legio_temp > target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false && PC1_status == 1){
-    move_motor_by_steps(FORWARD, 1);   // Arguments: direcion, number of steps in that direction
+  if(legio_temp > float(target_loop_temperature+TOLERANCE) && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_fw == false && PC1_status == 1){
+    move_motor_by_steps(FORWARD, 1);   // Arguments: direcion, number of steps in that direction   
     }
-  else if(legio_temp < target_loop_temperature && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false && PC1_status == 1){
+  else if(legio_temp < float(target_loop_temperature-TOLERANCE) && wait_for_regime_counter >= 10*WAIT_TIME && flag_alarm_rev == false && PC1_status == 1){
     move_motor_by_steps(REVERSE, 1);
   }
   else 
