@@ -16,7 +16,7 @@ int R1_status = 0;                                         //status of the boile
 int SL2_status, old_SL2_status;
 int SL3_status, old_SL3_status;
 //// firmware version of the device and device id ////
-#define SW_VERSION "0.2"
+#define SW_VERSION "0.3"
 #define DEVICE_TYPE "SC2"     
 #define DEVICE_ID 00000002
 //// Temperature variables and defines ////
@@ -30,14 +30,12 @@ int target_loop_temperature = 70;                        // Target temperature t
 bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable motor control in case of fully open/closed valve
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
 bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
+bool boiler_empty = false;                               // If boiler is empty, disable heating
 // Steinhart-Hart model coefficients for NTC sensors
 float A = 1.107430505e-03;
 float B = 2.382284132e-04;
 float C = 0.6743610533e-07;
 // Temperature in K = 1 / (A + B*ln(R_ntc) + C*(ln(R_ntc))^3)
-//ADC_voltage = Mv*val + Qv; Value in mV
-float Mv = 0.816326;
-float Qv = 121.836734;
 #define R_UP_TEMP 33000.0                                  // Upper resistance of the voltage partitioner used to measure the NTC resistance     
 
 volatile bool new_request = false;                        // flag that tells if a new request has arrived from the hub
@@ -91,7 +89,8 @@ int messageCount = 1;              // tells the number of the sent message
 hw_timer_t * timer = NULL;
 #define OVF_MS 100                       // The timer interrupt fires every 100 milliseconds
 volatile int time2sample_counter = 0; 
-volatile int wait_for_regime_counter = 0;      
+volatile int wait_for_regime_counter = 0;// used to implement wait time to win thermal inertia      
+volatile int too_full_counter = 0;       // used to sample SL2 sensor every second
 #define SAMPLING_TIME 5                  // Sample the sensors every SAMPLING_TIME seconds
 bool new_status = false;                 // When it's true a sensor has changed its value and it needs to be sent
 volatile bool timetosample = false; 
@@ -100,13 +99,16 @@ void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow ever
   time2sample_counter++;
   motor_counter++;
   wait_for_regime_counter++;
-  if(digitalRead(SL2_GPIO) == HIGH)  // keep electrovalve closed if boiler is too full (redundant)
-  {               
+  too_full_counter++;
+  // keep electrovalve closed if boiler is too full (checked every second instead of every 5)
+  if(too_full_counter >= OVF_MS/10)  
+  { 
+    too_full_counter = 0;
+    if(digitalRead(SL2_GPIO) == HIGH) {             
     EV1_status = 0;                         
-    digitalWrite(EV1_GPIO, EV1_status);  
+    digitalWrite(EV1_GPIO, EV1_status); 
+    } 
   }
-  if(boiler_too_full == true)
-      digitalWrite(EV1_GPIO, LOW);           // keep electrovalve closed if boiler is too full  
   if(time2sample_counter >= SAMPLING_TIME*10){
     timetosample = true;
     time2sample_counter = 0;
@@ -196,18 +198,22 @@ static void DeviceTwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsig
 
 float read_NTC_temperature(int channel){
   digitalWrite(ST1_FORCE_GPIO, HIGH);
-  float ADC_voltage = 0; 
-  float NTC_resistance, val, temperatureK;
-  for(int i = 0; i < TEMP_SAMPLES; i++)  {
-      val = analogRead(channel);
-      ADC_voltage += Mv*val + Qv;
+  float ADC_val = 0; 
+  float NTC_resistance, vin, temperatureK;
+  //https://w4krl.com/esp32-analog-to-digital-conversion-accuracy/
+  for(int i = 0; i < TEMP_SAMPLES; i++)  { 
+      ADC_val += analogRead(channel);
       delay(TEMP_INTERVAL);
   }  
   digitalWrite(ST1_FORCE_GPIO, LOW);
-  ADC_voltage /= TEMP_SAMPLES;
+  ADC_val /= TEMP_SAMPLES;
+  if(ADC_val>3000)
+    vin = (0.5*ADC_val + 1.0874);  
+  else
+    vin = (0.8*ADC_val + 0.1372);  
   //DEBUG_SERIAL.println(String("GPIO num: ") + String(channel));
-  //DEBUG_SERIAL.println(String("Computed ADC voltage (mV): ") + String(ADC_voltage, 2));
-  NTC_resistance = - (R_UP_TEMP*ADC_voltage) / (ADC_voltage-5000.0);
+  //DEBUG_SERIAL.println(String("Computed ADCn  voltage (mV): ") + String(vin, 2));
+  NTC_resistance = - (R_UP_TEMP*vin) / (vin-5000.0);
   //DEBUG_SERIAL.println(String("Computed NTC resistance: ") + String(NTC_resistance, 2));
   float logNTC = log(NTC_resistance);
   temperatureK = 1.0 / (A + B*logNTC + C*logNTC*logNTC*logNTC);
@@ -332,6 +338,7 @@ void goto_central_pos_of_3wayvalve(){
     DEBUG_SERIAL.println(String("Pulses needed to close: ")+String(pulses_FWD));
     if(motor_counter >= 10*SAFETY_LIMIT)
       DEBUG_SERIAL.println("Valve is fully closed");
+    /*  
     DEBUG_SERIAL.println("Searching number of impulses needed to open the valve");
     set_motor_direction(STOP);
     delay(1000);
@@ -351,10 +358,13 @@ void goto_central_pos_of_3wayvalve(){
     DEBUG_SERIAL.println(String("Pulses needed to open: ")+String(pulses_REV));
     if(motor_counter >= 10*SAFETY_LIMIT)
       DEBUG_SERIAL.println("Valve fully open");
-    int mean_pulses = (pulses_FWD + pulses_REV) / 2;
+    int mean_pulses = pulses_REV / 2;
+    */
+    int mean_pulses = 15;  // impulses from open to close are 30
     set_motor_direction(STOP);
     delay(1000);
-    set_motor_direction(FORWARD);
+    //set_motor_direction(FORWARD);
+    set_motor_direction(REVERSE);
     delay(500);
     DEBUG_SERIAL.println(String("Moving to half closed half open position ") + String(mean_pulses));
     int index = 0;
@@ -460,11 +470,6 @@ void loop() {
         break;
     }
   }
-  if(new_status == true) {                 // the value read from one or more sensors is changed, notify the HUB
-    new_status = false;
-    send_message(STATUS, messageCount);
-    messageCount++;
-  }
   if(timetosample == true) {             // sensor values are sampled every SAMPLING_TIME seconds
     timetosample = false;
     // Read status of sensors  //
@@ -477,8 +482,15 @@ void loop() {
         DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");
     }
     SL3_status = digitalRead(SL3_GPIO);
+    boiler_empty = (SL3_status == HIGH) ? false : true;
+    if(boiler_empty == true)
+    {
+      R1_status = 0;   
+      digitalWrite(R1_GPIO, R1_status);  
+      DEBUG_SERIAL.println("Boiler is empty, disabling heating");
+    }
     ST1_temp = read_NTC_temperature(ST1_MEASURE_GPIO); 
-    boiler_overtemperature = (ST1_temp >= 90) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
+    boiler_overtemperature = (ST1_temp >= 85) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
     if(boiler_overtemperature == true)         // disable boiler heater if temperature is too hot
     {
         R1_status = 0;   
@@ -491,6 +503,11 @@ void loop() {
     old_SL3_status = SL3_status;
     old_ST1_temp = ST1_temp;
     old_legio_temp = legio_temp;
+  }
+  if(new_status == true) {                 // the value read from one or more sensors is changed, notify the HUB
+  new_status = false;
+  send_message(STATUS, messageCount);
+  messageCount++;
   }
   // Legiomix control routine 
   // Open valve ---> HOT water. REVERSE tends to open the valve
