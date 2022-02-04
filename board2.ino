@@ -32,6 +32,7 @@ bool boiler_overtemperature = false;                     // Boiler overtemperatu
 bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
 bool boiler_empty = false;                               // If boiler is empty, disable heating
 // Steinhart-Hart model coefficients for NTC sensors
+// https://www.thinksrs.com/downloads/programs/therm%20calc/ntccalibrator/ntccalculator.html
 float A = 1.107430505e-03;
 float B = 2.382284132e-04;
 float C = 0.6743610533e-07;
@@ -364,9 +365,9 @@ void goto_central_pos_of_3wayvalve(){
     set_motor_direction(STOP);
     delay(1000);
     //set_motor_direction(FORWARD);
-    set_motor_direction(REVERSE);
-    delay(500);
     DEBUG_SERIAL.println(String("Moving to half closed half open position ") + String(mean_pulses));
+    set_motor_direction(REVERSE);
+    delay(1000);
     int index = 0;
     motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
