@@ -16,9 +16,9 @@ int R1_status = 0;                                         //status of the boile
 int SL2_status, old_SL2_status;
 int SL3_status, old_SL3_status;
 //// firmware version of the device and device id ////
-#define SW_VERSION "0.3"
+#define SW_VERSION "0.4"
 #define DEVICE_TYPE "SC2"     
-#define DEVICE_ID 00000002
+#define DEVICE_ID "00000002"
 //// Temperature variables and defines ////
 #define TEMP_SAMPLES 200                                  // Number of samples taken to give a temperature value
 #define TEMP_INTERVAL 10                                  // Interval of time in ms between two successive samples
@@ -31,6 +31,9 @@ bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable m
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
 bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
 bool boiler_empty = false;                               // If boiler is empty, disable heating
+int overtemp_warning_counter = 0;
+int empty_warning_counter = 0;
+int full_warning_counter = 0;
 // Steinhart-Hart model coefficients for NTC sensors
 // https://www.thinksrs.com/downloads/programs/therm%20calc/ntccalibrator/ntccalculator.html
 float A = 1.107430505e-03;
@@ -44,6 +47,7 @@ volatile int received_msg_id = 0;                         // used for ack mechan
 volatile int received_msg_type = -1;                      // if 0 the HUB wants to know the status of the device
                                                           // if 1 the HUB wants to change the status of the device (with thw values passed in the message)
                                                           // if 2 the device ACKs the HUB
+volatile int received_device_id;
 // defines for message type 
 #define STATUS 0
 #define SET_VALUES 1
@@ -137,9 +141,10 @@ static void MessageCallback(const char* payLoad, int size)
       DEBUG_SERIAL.println(error.f_str());
     }
     else {  
-    new_request = true;
+    new_request = true;  
     received_msg_id = doc["message_id"];
     received_msg_type = doc["message_type"];
+    received_device_id = doc["device_id"];
       if(received_msg_type == SET_VALUES) {
           PC1_status = doc["PC1"];
           R1_status = doc["R1"];
@@ -480,7 +485,11 @@ void loop() {
     {
         EV1_status = 0;                         
         digitalWrite(EV1_GPIO, EV1_status);
-        DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");
+        full_warning_counter++;
+        if(full_warning_counter > 10){
+          full_warning_counter = 0;
+          DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");
+        }  
     }
     SL3_status = digitalRead(SL3_GPIO);
     boiler_empty = (SL3_status == HIGH) ? false : true;
@@ -488,15 +497,24 @@ void loop() {
     {
       R1_status = 0;   
       digitalWrite(R1_GPIO, R1_status);  
-      DEBUG_SERIAL.println("Boiler is empty, disabling heating");
+      empty_warning_counter++;
+      if(empty_warning_counter > 10){
+        empty_warning_counter = 0;
+        DEBUG_SERIAL.println("Boiler is empty, disabling heating");
+      }
+      
     }
     ST1_temp = read_NTC_temperature(ST1_MEASURE_GPIO); 
     boiler_overtemperature = (ST1_temp >= 85) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
     if(boiler_overtemperature == true)         // disable boiler heater if temperature is too hot
     {
         R1_status = 0;   
-        digitalWrite(R1_GPIO, R1_status);  
-        DEBUG_SERIAL.println("Water in boiler is too hot, disabling heating");
+        digitalWrite(R1_GPIO, R1_status); 
+        overtemp_warning_counter++;
+        if(overtemp_warning_counter > 10){
+          overtemp_warning_counter = 0;
+          DEBUG_SERIAL.println("Water in boiler is too hot, disabling heating");
+        }   
     }
     legio_temp = read_NTC_temperature(TEMPSENS_LEGIO_GPIO);    // read temperature of mixed water exiting from legiomix
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp || legio_temp != old_legio_temp)  new_status = true;
