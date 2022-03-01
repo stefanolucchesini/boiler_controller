@@ -31,9 +31,6 @@ bool flag_alarm_fw = false, flag_alarm_rev = false;      // Flags that disable m
 bool boiler_overtemperature = false;                     // Boiler overtemperature flag (if Temperature is >90 it goes true and R1 is disabled)
 bool boiler_too_full = false;                            // If SL2 level is high the electrovalve opening is disabled
 bool boiler_empty = false;                               // If boiler is empty, disable heating
-int overtemp_warning_counter = 0;
-int empty_warning_counter = 0;
-int full_warning_counter = 0;
 // Steinhart-Hart model coefficients for NTC sensors
 // https://www.thinksrs.com/downloads/programs/therm%20calc/ntccalibrator/ntccalculator.html
 float A = 1.107430505e-03;
@@ -97,7 +94,7 @@ hw_timer_t * timer = NULL;
 volatile int time2sample_counter = 0; 
 volatile int wait_for_regime_counter = 0;// used to implement wait time to win thermal inertia      
 volatile int too_full_counter = 0;       // used to sample SL2 sensor every second
-#define SAMPLING_TIME 5                  // Sample the sensors every SAMPLING_TIME seconds
+#define SAMPLING_TIME 30                 // Sample the sensors every SAMPLING_TIME seconds
 bool new_status = false;                 // When it's true a sensor has changed its value and it needs to be sent
 volatile bool timetosample = false; 
 
@@ -106,8 +103,8 @@ void IRAM_ATTR onTimer(){            // Timer ISR, called on timer overflow ever
   motor_counter++;
   wait_for_regime_counter++;
   too_full_counter++;
-  // keep electrovalve closed if boiler is too full (checked every second instead of every 5)
-  if(too_full_counter >= OVF_MS/10)  
+  // keep electrovalve closed if boiler is too full (checked every half a second)
+  if(too_full_counter >= OVF_MS/20)  
   { 
     too_full_counter = 0;
     if(digitalRead(SL2_GPIO) == HIGH) {             
@@ -204,6 +201,7 @@ static void DeviceTwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsig
 
 float read_NTC_temperature(int channel){
   digitalWrite(ST1_FORCE_GPIO, HIGH);
+  delay(100);
   float ADC_val = 0; 
   float NTC_resistance, vin, temperatureK;
   //https://w4krl.com/esp32-analog-to-digital-conversion-accuracy/
@@ -329,7 +327,7 @@ void setup() {
 void goto_central_pos_of_3wayvalve(){
     DEBUG_SERIAL.println("Searching number of impulses needed to close the valve");
     set_motor_direction(FORWARD);
-    delay(500);                                // wait for electromechanical transient to end
+    //delay(500);                                // wait for electromechanical transient to end
     motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
       encstatus = digitalRead(MOTOR_ENCODER_GPIO);
@@ -372,7 +370,7 @@ void goto_central_pos_of_3wayvalve(){
     //set_motor_direction(FORWARD);
     DEBUG_SERIAL.println(String("Moving to half closed half open position ") + String(mean_pulses));
     set_motor_direction(REVERSE);
-    delay(1000);
+    delay(1500);
     int index = 0;
     motor_counter = 0;
     while(motor_counter <= 10*SAFETY_LIMIT){
@@ -488,11 +486,8 @@ void loop() {
     {
         EV1_status = 0;                         
         digitalWrite(EV1_GPIO, EV1_status);
-        full_warning_counter++;
-        if(full_warning_counter > 10){
-          full_warning_counter = 0;
-          DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");
-        }  
+        new_status = true;
+        DEBUG_SERIAL.println("Boiler is too full! EV1 is disabled");    
     }
     SL3_status = digitalRead(SL3_GPIO);
     boiler_empty = (SL3_status == HIGH) ? false : true;
@@ -500,12 +495,8 @@ void loop() {
     {
       R1_status = 0;   
       digitalWrite(R1_GPIO, R1_status);  
-      empty_warning_counter++;
-      if(empty_warning_counter > 10){
-        empty_warning_counter = 0;
-        DEBUG_SERIAL.println("Boiler is empty, disabling heating");
-      }
-      
+      new_status = true;
+      DEBUG_SERIAL.println("Boiler is empty, disabling heating");  
     }
     ST1_temp = read_NTC_temperature(ST1_MEASURE_GPIO); 
     boiler_overtemperature = (ST1_temp >= 85) ? true : false; // Maximum input temperature of legiomix's 3-way valve is 90 degC
@@ -513,11 +504,8 @@ void loop() {
     {
         R1_status = 0;   
         digitalWrite(R1_GPIO, R1_status); 
-        overtemp_warning_counter++;
-        if(overtemp_warning_counter > 10){
-          overtemp_warning_counter = 0;
-          DEBUG_SERIAL.println("Water in boiler is too hot, disabling heating");
-        }   
+        new_status = true;
+        DEBUG_SERIAL.println("Water in boiler is too hot, disabling heating");
     }
     legio_temp = read_NTC_temperature(TEMPSENS_LEGIO_GPIO);    // read temperature of mixed water exiting from legiomix
     if( SL2_status != old_SL2_status || SL3_status != old_SL3_status || ST1_temp != old_ST1_temp || legio_temp != old_legio_temp)  new_status = true;
